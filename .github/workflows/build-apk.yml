@@ -1,0 +1,159 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install packages
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/app@6 @capacitor/share@6 @capacitor/filesystem@6 pdfjs-dist@4.4.168 pdf-lib@1.17.1
+
+      - name: Copy PDF libraries into the app
+        run: |
+          mkdir -p www/lib
+          cp node_modules/pdfjs-dist/legacy/build/pdf.min.mjs www/lib/pdf.min.js
+          cp node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs www/lib/pdf.worker.min.js
+          cp -r node_modules/pdfjs-dist/cmaps www/lib/cmaps
+          cp -r node_modules/pdfjs-dist/standard_fonts www/lib/standard_fonts
+          cp node_modules/pdf-lib/dist/pdf-lib.min.js www/lib/pdf-lib.min.js
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Add "Open with" support for PDF files
+        run: |
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          f = '''<intent-filter>
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:mimeType="application/pdf" />
+                  </intent-filter>
+              </activity>'''
+          s = s.replace('</activity>', f, 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+
+      - name: Add native print plugin
+        run: |
+          D=android/app/src/main/java/com/example/pdfreader
+          cat > $D/MainActivity.java <<'EOF'
+          package com.example.pdfreader;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  registerPlugin(PdfPrintPlugin.class);
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          EOF
+          cat > $D/PdfPrintPlugin.java <<'EOF'
+          package com.example.pdfreader;
+
+          import android.content.Context;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.CancellationSignal;
+          import android.os.ParcelFileDescriptor;
+          import android.print.PageRange;
+          import android.print.PrintAttributes;
+          import android.print.PrintDocumentAdapter;
+          import android.print.PrintDocumentInfo;
+          import android.print.PrintManager;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+
+          @CapacitorPlugin(name = "PdfPrint")
+          public class PdfPrintPlugin extends Plugin {
+              @PluginMethod
+              public void print(final PluginCall call) {
+                  final String uri = call.getString("uri");
+                  final String name = call.getString("name", "document");
+                  if (uri == null) {
+                      call.reject("uri missing");
+                      return;
+                  }
+                  final File file = new File(Uri.parse(uri).getPath());
+                  getActivity().runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          PrintManager pm = (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
+                          pm.print(name, new PrintDocumentAdapter() {
+                              @Override
+                              public void onLayout(PrintAttributes oldAttrs, PrintAttributes newAttrs, CancellationSignal signal, LayoutResultCallback callback, Bundle extras) {
+                                  if (signal.isCanceled()) {
+                                      callback.onLayoutCancelled();
+                                      return;
+                                  }
+                                  PrintDocumentInfo info = new PrintDocumentInfo.Builder(name)
+                                      .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                      .build();
+                                  callback.onLayoutFinished(info, true);
+                              }
+
+                              @Override
+                              public void onWrite(PageRange[] pages, ParcelFileDescriptor dest, CancellationSignal signal, WriteResultCallback callback) {
+                                  try (InputStream in = new FileInputStream(file);
+                                       OutputStream out = new FileOutputStream(dest.getFileDescriptor())) {
+                                      byte[] buf = new byte[16384];
+                                      int n;
+                                      while ((n = in.read(buf)) > 0) {
+                                          out.write(buf, 0, n);
+                                      }
+                                      callback.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
+                                  } catch (Exception e) {
+                                      callback.onWriteFailed(e.toString());
+                                  }
+                              }
+                          }, null);
+                          call.resolve();
+                      }
+                  });
+              }
+          }
+          EOF
+
+      - name: Sync web files and plugins
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-reader-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
