@@ -35,7 +35,15 @@ jobs:
           cp node_modules/pdf-lib/dist/pdf-lib.min.js www/lib/pdf-lib.min.js
 
       - name: Create Android project
-        run: npx cap add android
+        run: |
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.example.pdfreader",
+            "appName": "PDF Reader",
+            "webDir": "www"
+          }
+          EOF
+          npx cap add android
 
       - name: Add "Open with" support for PDF files
         run: |
