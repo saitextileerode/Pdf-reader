@@ -28,6 +28,14 @@ jobs:
       - name: Copy PDF libraries into the app
         run: |
           mkdir -p www/lib
+          if [ ! -f www/index.html ]; then
+            if [ -f index.html ]; then
+              cp index.html www/index.html
+            else
+              echo "ERROR: index.html repo-la illai. www/index.html-a add pannunga."
+              exit 1
+            fi
+          fi
           cp node_modules/pdfjs-dist/legacy/build/pdf.min.mjs www/lib/pdf.min.js
           cp node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs www/lib/pdf.worker.min.js
           cp -r node_modules/pdfjs-dist/cmaps www/lib/cmaps
